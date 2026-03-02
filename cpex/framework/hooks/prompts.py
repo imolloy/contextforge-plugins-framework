@@ -28,10 +28,6 @@ class PromptHookType(str, Enum):
     Attributes:
         prompt_pre_fetch: The prompt pre hook.
         prompt_post_fetch: The prompt post hook.
-        tool_pre_invoke: The tool pre invoke hook.
-        tool_post_invoke: The tool post invoke hook.
-        resource_pre_fetch: The resource pre fetch hook.
-        resource_post_fetch: The resource post fetch hook.
 
     Examples:
         >>> PromptHookType.PROMPT_PRE_FETCH
