@@ -4,7 +4,7 @@
 
 # CPEX — ContextForge Plugin Extensibility Framework
 
-<i>A lightweight, composable plugin framework for building extensible AI systems.</i>
+_A lightweight, composable plugin framework for building extensible AI systems._
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
@@ -49,6 +49,7 @@ CPEX introduces **standardized interception hooks** between your application and
 - **Observability** — request tracing, audit logging, metrics collection
 - **Governance** — policy enforcement, compliance validation, approval workflows
 - **Reliability** — rate limiting, circuit breakers, response validation
+- **Accountability** - non-human identity, human-in-the-loop flows, enterprise tool integration
 
 CPEX is designed for modern **AI and agent systems**, but works equally well for any application that needs **safe, modular extensibility**.
 
@@ -70,7 +71,7 @@ The plugin manager handles registration, ordering, execution, timeouts, and erro
 
 ### Hooks
 
-A hook is a named interception point in your application. You define a hook where you want plugins to be able to run, then call it there.
+A hook is a named interception point in your application. You define the necessary data model and place the hook where you want plugins to be able to run, then call it there.
 
 **Define hook models:**
 
@@ -162,7 +163,7 @@ A plugin method can:
 
 ### Execution Modes
 
-Plugins run in phases in this order: `sequential` → `audit` → `concurrent` → `fire_and_forget`.
+Plugins run in phases ordered by their mode: `sequential` → `audit` → `concurrent` → `fire_and_forget`.
 
 | Mode | Execution | Can block? | State merged? | Use case |
 |------|-----------|:-----------:|:-------------:|---------|
@@ -176,9 +177,9 @@ Error handling is configured separately with `on_error`, independent of mode:
 
 | `on_error` | Behavior |
 |-----------|---------|
-| `fail` | Pipeline halts, error propagates (default) |
-| `ignore` | Error logged; pipeline continues |
-| `disable` | Error logged; plugin auto-disabled; pipeline continues |
+| `fail` | Fail-Closed; Pipeline halts, error propagates (default) |
+| `ignore` | Fail-Open; Error logged; pipeline continues |
+| `disable` | Fail-Open; Error logged; plugin auto-disabled; pipeline continues |
 
 ### Plugin Manager
 
