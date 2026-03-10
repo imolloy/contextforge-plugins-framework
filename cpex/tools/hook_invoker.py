@@ -80,11 +80,12 @@ class HookInvoker:
             try:
                 if self.config_path:
                     config = ConfigLoader.load_config(self.config_path)
-                    self._plugin_manager = PluginManager(config)
+                    logger.debug(f"Loaded config: {config}")
+                    self._plugin_manager = PluginManager(self.config_path)
                 else:
                     # Use default configuration
                     self._plugin_manager = PluginManager()
-
+                logger.debug(f"Initialized PluginManager: {self._plugin_manager}")
                 # Initialize plugin manager asynchronously
                 asyncio.get_event_loop().run_until_complete(
                     self._plugin_manager.initialize()
@@ -121,7 +122,9 @@ class HookInvoker:
             # Apply schema mapping if specified
             if schema_mapper:
                 mapper = get_schema_mapper(schema_mapper)
+                logger.debug(f"Mapping payload using schema mapper: {schema_mapper} mapper: {mapper}")
                 payload = mapper.map_to_hook_payload(payload, hook_type)
+                logger.debug(f"Mapped payload: {payload}")
 
             # Validate hook type is registered
             registry = get_hook_registry()

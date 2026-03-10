@@ -21,7 +21,16 @@ Features
 Typical usage
 ─────────────
 ```console
+# Direct payload
 $ cpex invoke --hook tool_pre_invoke --payload '{"name": "search", "args": {"query": "test"}}'
+
+# From file
+$ cpex invoke --hook tool_pre_invoke --payload ./payload.json
+
+# From stdin (pipe)
+$ echo '{"name": "search", "args": {"query": "test"}}' | cpex invoke --hook tool_pre_invoke
+
+# Hook introspection
 $ cpex hooks list
 $ cpex hooks describe tool_pre_invoke
 ```
@@ -30,8 +39,12 @@ $ cpex hooks describe tool_pre_invoke
 # Standard
 import json
 import logging
+import logging.handlers
+import sys
 from pathlib import Path
 from typing import Optional
+import os
+from datetime import datetime
 
 # Third-Party
 import typer
@@ -103,6 +116,68 @@ def load_json_payload(payload_input: str) -> dict:
     raise typer.Exit(ExitCode.CONFIGURATION_ERROR.value)
 
 
+def configure_logging(log_level: str = "info", log_file: Optional[str] = None) -> None:
+    """Configure logging with file output and specified level.
+
+    Args:
+        log_level: Logging level (debug, info, warning, error)
+        log_file: Optional path to log file. If None, uses default location.
+    """
+    # Convert string level to logging level
+    level_map = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "error": logging.ERROR
+    }
+    level = level_map.get(log_level.lower(), logging.INFO)
+
+    # Create logs directory if needed
+    if log_file is None:
+        logs_dir = Path.cwd() / "logs"
+        logs_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = logs_dir / f"cpex_debug_{timestamp}.log"
+    else:
+        log_file = Path(log_file)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Create formatter
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)8s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Clear any existing handlers
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Configure root logger
+    root_logger.setLevel(level)
+
+    # Create file handler
+    file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+    # Create console handler for errors only (unless debug level)
+    console_handler = logging.StreamHandler(sys.stderr)
+    if level == logging.DEBUG:
+        console_handler.setLevel(logging.DEBUG)
+    else:
+        console_handler.setLevel(logging.ERROR)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # Log configuration info
+    logger.info(f"Logging configured - Level: {log_level}, File: {log_file}")
+    logger.debug(f"Python version: {sys.version}")
+    logger.debug(f"Working directory: {Path.cwd()}")
+    logger.debug(f"Environment variables: {dict(os.environ)}")
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -110,30 +185,59 @@ def load_json_payload(payload_input: str) -> dict:
 @app.command(help="Invoke a hook with the provided JSON payload.")
 def invoke(
     hook: Annotated[str, typer.Option("--hook", "-h", help="The hook type to invoke (e.g., 'tool_pre_invoke')")],
-    payload: Annotated[str, typer.Option("--payload", "-p", help="JSON payload string or path to JSON file")],
+    payload: Annotated[Optional[str], typer.Option("--payload", "-p", help="JSON payload string or path to JSON file (reads from stdin if not provided)")] = None,
     context: Annotated[Optional[str], typer.Option("--context", "-c", help="Global context JSON string or file path")] = None,
     config: Annotated[Optional[Path], typer.Option("--config", "-f", help="Plugin configuration file path")] = None,
     schema: Annotated[Optional[str], typer.Option("--schema", "-s", help="Schema mapper for external tool integration (e.g., 'claude-code')")] = None,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose logging")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose logging (deprecated: use --log-level debug)")] = False,
+    log_level: Annotated[str, typer.Option("--log-level", "-l", help="Logging level: debug, info, warning, error")] = "info",
+    log_file: Annotated[Optional[str], typer.Option("--log-file", help="Path to log file (default: logs/cpex_debug_<timestamp>.log)")] = None,
 ) -> None:
     """Invoke a hook with the provided JSON payload.
 
+    The payload can be provided in three ways:
+    1. As a JSON string: --payload '{"name": "test", "args": {}}'
+    2. As a file path: --payload ./payload.json
+    3. From stdin: echo '{"name": "test", "args": {}}' | cpex invoke --hook tool_pre_invoke
+
     Args:
         hook: The hook type to invoke
-        payload: JSON payload string or path to JSON file
+        payload: JSON payload string or path to JSON file (reads from stdin if not provided)
         context: Optional global context JSON string or file path
         config: Optional plugin configuration file path
         schema: Optional schema mapper for external tool integration
-        verbose: Enable verbose logging
+        verbose: Enable verbose logging (deprecated: use --log-level debug)
+        log_level: Logging level (debug, info, warning, error)
+        log_file: Optional path to log file (default: logs/cpex_debug_<timestamp>.log)
     """
-    # Configure logging if verbose
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG)
-        logger.debug("Verbose logging enabled")
+    # Configure logging - handle deprecated verbose flag
+    actual_log_level = log_level
+    if verbose and log_level == "info":
+        actual_log_level = "debug"
+
+    configure_logging(log_level=actual_log_level, log_file=log_file)
+    logger.info(f"Starting hook invocation - Hook: {hook}, Schema: {schema}")
+    logger.debug(f"Command line arguments: hook={hook}, payload={payload}, context={context}, "
+                f"config={config}, schema={schema}, log_level={actual_log_level}, log_file={log_file}")
 
     try:
-        # Parse payload
-        payload_data = load_json_payload(payload)
+        # Parse payload - read from stdin if not provided
+        if payload is None:
+            # Read from stdin
+            if sys.stdin.isatty():
+                logger.error("No payload provided and no data piped to stdin. Please provide --payload or pipe JSON data.")
+                raise typer.Exit(ExitCode.CONFIGURATION_ERROR.value)
+
+            stdin_data = sys.stdin.read().strip()
+            if not stdin_data:
+                logger.error("No payload provided and stdin is empty. Please provide --payload or pipe JSON data.")
+                raise typer.Exit(ExitCode.CONFIGURATION_ERROR.value)
+
+            logger.debug(f"Reading payload from stdin: {stdin_data[:100]}...")
+            payload_data = load_json_payload(stdin_data)
+        else:
+            payload_data = load_json_payload(payload)
+
         logger.debug(f"Loaded payload: {payload_data}")
 
         # Parse context if provided
@@ -141,7 +245,7 @@ def invoke(
         if context:
             context_data = load_json_payload(context)
             logger.debug(f"Loaded context: {context_data}")
-
+        # print(f"Invoking hook '{hook}' with payload: {payload_data} and context: {context_data} and schema: {schema}")
         # Create hook invoker and execute
         invoker = HookInvoker(config_path=config)
         result = invoker.invoke_hook_sync(
@@ -161,7 +265,7 @@ def invoke(
 
     except Exception as e:
         logger.error(f"Hook invocation failed: {e}")
-        if verbose:
+        if actual_log_level == "debug":
             logger.exception("Full traceback:")
         raise typer.Exit(ExitCode.EXECUTION_ERROR.value)
 

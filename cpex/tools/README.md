@@ -197,7 +197,7 @@ sequenceDiagram
 
 ### 🔧 **Hook Invocation (`cpex invoke`)**
 - Execute any registered hook with JSON payloads
-- Support for file-based or inline JSON input
+- Multiple input methods: inline JSON, files, or stdin (pipes)
 - Global context injection for request metadata
 - Schema mapping for external tool integration
 - Verbose logging and error reporting
@@ -221,25 +221,49 @@ sequenceDiagram
 
 ### Basic Hook Invocation
 ```bash
-# Simple tool invocation
+# Simple tool invocation (inline JSON)
 cpex invoke --hook tool_pre_invoke --payload '{"name": "search", "args": {"query": "test"}}'
+
+# From stdin (pipe)
+echo '{"name": "search", "args": {"query": "test"}}' | cpex invoke --hook tool_pre_invoke
+
+# From file
+cpex invoke --hook tool_pre_invoke --payload ./payload.json
+
+# Multi-line JSON via heredoc
+cat <<'EOF' | cpex invoke --hook tool_pre_invoke
+{
+  "name": "complex_tool",
+  "args": {
+    "config": {"nested": "data"},
+    "options": ["a", "b", "c"]
+  }
+}
+EOF
 
 # With custom context
 cpex invoke --hook tool_pre_invoke \
   --payload '{"name": "search", "args": {"query": "test"}}' \
   --context '{"request_id": "req-123", "user": "alice"}'
 
-# From files
-cpex invoke --hook tool_pre_invoke \
-  --payload ./payload.json \
-  --context ./context.json
+# Combine stdin payload with file context
+echo '{"name": "search", "args": {}}' | cpex invoke --hook tool_pre_invoke --context ./context.json
 ```
 
 ### Claude Code Integration
 ```bash
-# Transform Claude Code payload format
+# Transform Claude Code payload format (inline)
 cpex invoke --hook tool_pre_invoke \
   --payload '{"tool_name": "search", "arguments": {"query": "test"}}' \
+  --schema claude-code
+
+# Transform Claude Code payload from stdin
+echo '{"tool_name": "search", "arguments": {"query": "test"}, "session_id": "sess-123"}' | \
+  cpex invoke --hook tool_pre_invoke --schema claude-code
+
+# Process Claude Code hook event from file
+cpex invoke --hook tool_pre_invoke \
+  --payload ./claude_hook_event.json \
   --schema claude-code
 ```
 

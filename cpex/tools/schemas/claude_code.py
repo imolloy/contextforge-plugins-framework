@@ -35,13 +35,40 @@ Future Expansion
 
 # Standard
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Literal, Optional
+
+from pydantic import BaseModel
 
 # First-Party
 from cpex.framework.models import PluginResult
 from cpex.tools.schemas.base import SchemaMapper, register_schema_mapper
 
 logger = logging.getLogger(__name__)
+
+
+# Hard code the mapping here for now
+CLAUDE_CODE_CPEX_HOOK_MAPPING = {
+    "PreToolUse": {
+        "hook_type": "tool_pre_invoke",
+        "payload": {
+            "name": "command",
+            "args": "",
+            "headers": None
+        }
+    },
+    "PostToolUse": "tool_post_invoke",
+    "PostToolUseFailure": "tool_post_invoke",  # Map failures to post-invoke with error info
+    # Future mappings:
+    # "SessionStart": "session_start",
+    # "SessionEnd": "session_end",
+    # "UserPromptSubmit": "user_prompt_submit",
+    # "SubagentStart": "agent_pre_invoke",
+    # "SubagentStop": "agent_post_invoke",
+    # "PermissionRequest": "permission_request",
+}
+
+
+
 
 
 class ClaudeCodeSchemaMapper(SchemaMapper):
@@ -152,7 +179,7 @@ class ClaudeCodeSchemaMapper(SchemaMapper):
         # Build CPEX tool_pre_invoke payload
         cpex_payload = {
             "name": tool_name,
-            "args": payload.get("arguments", {}),
+            "args": payload.get("tool_input", {}),
         }
 
         # Add headers if available (for HTTP passthrough)
@@ -222,18 +249,28 @@ class ClaudeCodeSchemaMapper(SchemaMapper):
 
         # Add Claude Code specific response format
         claude_result = {
-            "continue_processing": hook_result.continue_processing,
-            "cpex_result": result,
-            "hook_type": hook_type,
+            "continue": hook_result.continue_processing,
+            # "cpex_result": result,
+            # "hook_type": hook_type,
         }
+        if hook_type == "tool_pre_invoke":
+            claude_result["hookSpecificOutput"] = {
+                "HookEventName": "PreToolUse",
+                "PermissionDecision": "allow" if hook_result.continue_processing else "deny",
+                # "PermissionDecisionReason": hook_result.violation.reason if hook_result.violation else None
+            }
 
         # Include violation information if present
         if hook_result.violation:
-            claude_result["violation"] = {
-                "reason": hook_result.violation.reason,
-                "code": hook_result.violation.code,
-                "details": hook_result.violation.details,
-            }
+            claude_result["stopReason"] = hook_result.violation.reason
+            if hook_type == "tool_pre_invoke":
+                claude_result["hookSpecificOutput"]["PermissionDecision"] = "deny"
+                claude_result["hookSpecificOutput"]["PermissionDecisionReason"] = hook_result.violation.reason
+            # claude_result["violation"] = {
+            #     "stopReason": hook_result.violation.reason,
+            #     "code": hook_result.violation.code,
+            #     "details": hook_result.violation.details,
+            # }
 
         # Include modified payload if present
         if hook_result.modified_payload:
@@ -265,3 +302,27 @@ class ClaudeCodeSchemaMapper(SchemaMapper):
 
 # Register the Claude Code schema mapper
 register_schema_mapper("claude-code", ClaudeCodeSchemaMapper)
+
+
+class ClaudeCommonInput(BaseModel):
+    """Claude Code Hook Common Input Schema."""
+    session_id: str
+    transcript_path: str
+    cwd: str
+    permission_mode: Literal["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"]
+    hook_event_name: str
+    agent_id: Optional[str] = None
+    agent_type: Optional[str] = None
+
+
+class ClaudeCommonOutput(BaseModel):
+    _continue: bool
+    stopReason: str
+    suppressOutput: bool
+    systemMessage: str
+
+
+class PreToolUseModel(ClaudeCommonInput):
+    """Claude Code PreToolUse Event Schema."""
+    tool_name: str
+    tool_input: Dict[str, Any]
