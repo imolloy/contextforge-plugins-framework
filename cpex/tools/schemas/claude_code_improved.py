@@ -19,9 +19,9 @@ Key Improvements:
 
 from abc import ABC, abstractmethod
 import logging
-from typing import Any, Dict, Generic, Literal, Optional, Type, TypeVar, Union
+from typing import Annotated, Any, Dict, Generic, Literal, Optional, Type, TypeVar, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator, AliasChoices
 
 from cpex.framework.hooks.tools import ToolPreInvokePayload, ToolPostInvokePayload
 from cpex.framework.models import PluginResult, PluginViolation
@@ -34,6 +34,8 @@ ClaudeInput = TypeVar('ClaudeInput', bound=BaseModel)
 ClaudeOutput = TypeVar('ClaudeOutput', bound=BaseModel)
 CPEXPayload = TypeVar('CPEXPayload', bound=BaseModel)
 CPEXResult = TypeVar('CPEXResult', bound=PluginResult)
+
+
 
 # =============================================================================
 # Claude Code Input Schemas
@@ -48,15 +50,19 @@ class ClaudeCommonFields(BaseModel):
     permission_mode: Literal["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"] = Field(
         description="Current permission mode"
     )
-    hook_event_name: str = Field(description="Name of the hook event")
     agent_id: Optional[str] = Field(default=None, description="Agent identifier if applicable")
     agent_type: Optional[str] = Field(default=None, description="Agent type if applicable")
 
 
 class ClaudePreToolUseInput(ClaudeCommonFields):
     """Claude Code PreToolUse event input schema."""
-    tool_name: str = Field(description="Name of the tool being invoked")
-    tool_input: Dict[str, Any] = Field(default_factory=dict, description="Arguments for tool invocation")
+    hook_event_name: Literal["PreToolUse"]
+    tool_name: str = Field(description="Name of the tool being invoked",
+                           validation_alias=AliasChoices("name", "tool_name"),
+                           serialization_alias="name")
+    tool_input: Dict[str, Any] = Field(default_factory=dict, description="Arguments for tool invocation",
+                                       validation_alias=AliasChoices("tool_input", "args"),
+                                       serialization_alias="args")
     headers: Optional[Dict[str, str]] = Field(default=None, description="HTTP headers for passthrough")
 
     @field_validator('tool_name')
@@ -69,11 +75,11 @@ class ClaudePreToolUseInput(ClaudeCommonFields):
 
 class ClaudePostToolUseInput(ClaudeCommonFields):
     """Claude Code PostToolUse event input schema."""
+    hook_event_name: Literal["PostToolUse"]
     tool_name: str = Field(description="Name of the tool that was invoked")
-    result: Optional[Any] = Field(default=None, description="Tool execution result")
-    error: Optional[Dict[str, Any]] = Field(default=None, description="Error information if tool failed")
-    execution_time: Optional[float] = Field(default=None, description="Tool execution time in seconds")
-    success: bool = Field(default=True, description="Whether tool execution was successful")
+    tool_input: Dict[str, Any] = Field(default_factory=dict, description="Arguments that were used for tool invocation")    
+    tool_response: Dict[str, Any] = Field(default=None, description="Raw response from the tool")
+    tool_use_id: str
 
     @field_validator('tool_name')
     @classmethod
@@ -82,16 +88,16 @@ class ClaudePostToolUseInput(ClaudeCommonFields):
             raise ValueError("tool_name cannot be empty")
         return v.strip()
 
-    @model_validator(mode='after')
-    def validate_result_or_error(self):
-        if not self.success and not self.error:
-            raise ValueError("error field required when success=False")
-        return self
 
+ClaudeHookInput = Annotated[
+    Union[ClaudePreToolUseInput, ClaudePostToolUseInput],
+    Field(discriminator="hook_event_name")
+]
 
 # =============================================================================
 # Claude Code Output Schemas
 # =============================================================================
+
 
 class ClaudeCommonOutput(BaseModel):
     """Common output fields for all Claude Code responses."""

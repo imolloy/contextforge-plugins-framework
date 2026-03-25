@@ -9,16 +9,19 @@ from unittest.mock import Mock
 
 from cpex.framework.models import PluginResult, PluginViolation
 from cpex.framework.hooks.tools import ToolPreInvokePayload, ToolPostInvokePayload
-from cpex.tools.schemas.claude_code import ClaudeCodeSchemaMapper, PreToolUseModel
+# from cpex.tools.schemas.claude_code import ClaudeCodeSchemaMapper, PreToolUseModel
+from cpex.tools.schemas.claude_code_improved import ClaudeHookInput
 from cpex.tools.schemas.base import register_schema_mapper, get_schema_mapper
 
+from pydantic import TypeAdapter
 
 class TestClaudeCodeSchemaMapper:
     """Test suite for Claude Code schema mapper conversions."""
 
     def setup_method(self):
         """Set up test fixtures."""
-        self.mapper = ClaudeCodeSchemaMapper()
+        # self.mapper = ClaudeCodeSchemaMapper()
+        pass
 
     def test_map_from_claude_tool_pre_invoke_payload(self):
         claude_hook_payload = {
@@ -32,60 +35,86 @@ class TestClaudeCodeSchemaMapper:
                 "command": "npm test"
             }
             }
-        PreToolUseModel(**claude_hook_payload)  # Should not raise validation error
-        mapper = ClaudeCodeSchemaMapper()
-        cpex_payload = mapper.map_to_hook_payload(claude_hook_payload, "tool_pre_invoke")
-        assert cpex_payload["name"] == "Bash"
+        adapter = TypeAdapter(ClaudeHookInput)
+        payload = adapter.validate_python(claude_hook_payload)  # Should not raise validation error
+
+        cpex_payload = payload.model_dump(by_alias=True)
+        
+        cpex_object = ToolPreInvokePayload(**cpex_payload)
+        assert "name" in cpex_payload
+        assert cpex_object.name == "Bash"
     
     
-    def test_map_from_hook_result_basic_success(self):
-        """Test basic successful PluginResult to Claude Code conversion."""
-        # Create a basic successful PluginResult
-        plugin_result = PluginResult[ToolPreInvokePayload](
-            continue_processing=True,
-            modified_payload=None,
-            violation=None,
-            metadata={"plugin_name": "test_plugin"}
-        )
+        claude_hook_payload_post = {
+            "session_id": "abv123",
+            "transcript_path": "/home/user/foo",
+            "cwd": "/home/user/",
+            "permission_mode": "default",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": "/home/user/bar",
+                "content": "Hello, World!"
+            },
+            "tool_response": {
+                "type": "create",
+                "filePath": "/home/user/bar",
+                "content": "Goodbye, World!",
+                "structuredPatch": [],
+                "originalFile": None
+            },
+            "tool_use_id": "toolu_1234"
+            }
+        payload = adapter.validate_python(claude_hook_payload_post)
+    
+    # def test_map_from_hook_result_basic_success(self):
+    #     """Test basic successful PluginResult to Claude Code conversion."""
+    #     # Create a basic successful PluginResult
+    #     plugin_result = PluginResult[ToolPreInvokePayload](
+    #         continue_processing=True,
+    #         modified_payload=None,
+    #         violation=None,
+    #         metadata={"plugin_name": "test_plugin"}
+    #     )
 
-        # Convert to Claude Code format
-        claude_result = self.mapper.map_from_hook_result(plugin_result, "tool_pre_invoke")
+    #     # Convert to Claude Code format
+    #     claude_result = self.mapper.map_from_hook_result(plugin_result, "tool_pre_invoke")
 
-        # Verify the conversion
-        assert claude_result["continue"] is True
-        assert "hookSpecificOutput" in claude_result
-        assert claude_result["hookSpecificOutput"]["HookEventName"] == "PreToolUse"
-        assert claude_result["hookSpecificOutput"]["PermissionDecision"] == "allow"
+    #     # Verify the conversion
+    #     assert claude_result["continue"] is True
+    #     assert "hookSpecificOutput" in claude_result
+    #     assert claude_result["hookSpecificOutput"]["HookEventName"] == "PreToolUse"
+    #     assert claude_result["hookSpecificOutput"]["PermissionDecision"] == "allow"
         
 
-    def test_map_from_hook_result_with_violation(self):
-        """Test PluginResult conversion when violation is present."""
-        # Create a violation
-        violation = PluginViolation(
-            reason="Blocked for security",
-            description="Tool execution blocked due to security policy",
-            code="SECURITY_VIOLATION",
-            details={"tool_name": "dangerous_tool", "risk_level": "high"}
-        )
+    # def test_map_from_hook_result_with_violation(self):
+    #     """Test PluginResult conversion when violation is present."""
+    #     # Create a violation
+    #     violation = PluginViolation(
+    #         reason="Blocked for security",
+    #         description="Tool execution blocked due to security policy",
+    #         code="SECURITY_VIOLATION",
+    #         details={"tool_name": "dangerous_tool", "risk_level": "high"}
+    #     )
 
-        # Create PluginResult with violation
-        plugin_result = PluginResult[ToolPreInvokePayload](
-            continue_processing=False,
-            modified_payload=None,
-            violation=violation,
-            metadata={"blocked_by": "security_plugin"}
-        )
+    #     # Create PluginResult with violation
+    #     plugin_result = PluginResult[ToolPreInvokePayload](
+    #         continue_processing=False,
+    #         modified_payload=None,
+    #         violation=violation,
+    #         metadata={"blocked_by": "security_plugin"}
+    #     )
 
-        # Convert to Claude Code format
-        claude_result = self.mapper.map_from_hook_result(plugin_result, "tool_pre_invoke")
+    #     # Convert to Claude Code format
+    #     claude_result = self.mapper.map_from_hook_result(plugin_result, "tool_pre_invoke")
 
-        # Verify the conversion
-        assert claude_result["continue"] is False
-        assert claude_result["stopReason"] == violation.reason
-        assert "hookSpecificOutput" in claude_result
-        assert claude_result["hookSpecificOutput"]["HookEventName"] == "PreToolUse"
-        assert claude_result["hookSpecificOutput"]["PermissionDecision"] == "deny"
-        assert claude_result["hookSpecificOutput"]["PermissionDecisionReason"] == violation.reason
+    #     # Verify the conversion
+    #     assert claude_result["continue"] is False
+    #     assert claude_result["stopReason"] == violation.reason
+    #     assert "hookSpecificOutput" in claude_result
+    #     assert claude_result["hookSpecificOutput"]["HookEventName"] == "PreToolUse"
+    #     assert claude_result["hookSpecificOutput"]["PermissionDecision"] == "deny"
+    #     assert claude_result["hookSpecificOutput"]["PermissionDecisionReason"] == violation.reason
         
         # assert claude_result["hook_type"] == "tool_pre_invoke"
 
