@@ -19,7 +19,7 @@ Key Improvements:
 
 from abc import ABC, abstractmethod
 import logging
-from typing import Annotated, Any, Dict, Generic, Literal, Optional, Type, TypeVar, Union
+from typing import Annotated, Any, Dict, Generic, List, Literal, Optional, Type, TypeVar, Union
 from xml.parsers.expat import model
 
 from pydantic import BaseModel, Field, field_validator, model_validator, AliasChoices
@@ -275,14 +275,13 @@ ClaudeHookInput = Annotated[
 # Claude Code Output Schemas
 # =============================================================================
 
-
+# TODO Verify these common fields
 class ClaudeCommonOutput(BaseModel):
     """Common output fields for all Claude Code responses."""
     continue_: bool = Field(alias="_continue", description="Whether to continue processing")
     stop_reason: Optional[str] = Field(default=None, description="Reason for stopping if continue=False")
     suppress_output: bool = Field(default=False, description="Whether to suppress output to user")
     system_message: Optional[str] = Field(default=None, description="Message to display to user")
-
     model_config = {"populate_by_name": True}
 
 
@@ -294,7 +293,7 @@ class ClaudePreToolUseOutput(ClaudeCommonOutput):
         permission_decision: Literal["allow", "deny"] = Field(description="Permission decision")
         permission_decision_reason: Optional[str] = Field(default=None, description="Reason for denial")
 
-    hook_specific_output: HookSpecificOutput = Field(description="PreToolUse specific output")
+    hookSpecificOutput: HookSpecificOutput = Field(description="PreToolUse specific output")
     modified_payload: Optional[Dict[str, Any]] = Field(default=None, description="Modified tool arguments")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata")
 
@@ -306,9 +305,128 @@ class ClaudePostToolUseOutput(ClaudeCommonOutput):
         hook_event_name: Literal["PostToolUse"] = "PostToolUse"
         # Add any PostToolUse specific fields here
 
-    hook_specific_output: HookSpecificOutput = Field(description="PostToolUse specific output")
+    hookSpecificOutput: HookSpecificOutput = Field(description="PostToolUse specific output")
     modified_result: Optional[Any] = Field(default=None, description="Modified tool result")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata")
+
+
+class ClaudeSessionStartOutput(ClaudeCommonOutput):
+    """Claude Code SessionStart event output schema."""
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["SessionStart"] = "SessionStart"
+        additionalContext: str = Field(description="Additional context to provide for the session")
+    hookSpecificOutput: HookSpecificOutput = Field(description="SessionStart specific output")
+
+
+class ClaudeInstructionsLoadedOutput(ClaudeCommonOutput):
+    """InstructionsLoaded hooks have no decision control.
+    They cannot block or modify instruction loading.
+    Use this event for audit logging, compliance tracking, or observability."""
+
+
+class ClaudeUserPromptSubmitOutput(ClaudeCommonOutput):
+    """UserPromptSubmit hooks have no decision control. They cannot block or modify the user prompt. Use this event for audit logging, compliance tracking, or observability."""
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["UserPromptSubmit"] = "UserPromptSubmit"
+        addditionalContext: Optional[str] = Field(default=None, description="Additional context added to the model")
+    decision: Optional[Literal["block"]] = Field(default=None, description="Whether to block the user prompt")
+    reason: str = Field(default="", description="Reason for blocking the user prompt if decision is block. Shown to the user")
+    hookSpecificOutput: Optional[HookSpecificOutput] = Field(default=None, description="UserPromptSubmit specific output")
+
+
+class ClaudePreToolUseOutput(ClaudeCommonOutput):
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["PreToolUse"] = "PreToolUse"
+        permission_decision: Literal["allow", "deny", "ask"] = Field(description="Permission decision")
+        permissionDecisionReason: Optional[str] = Field(default=None, description="Reason for denial")
+        updatedInput: Optional[Dict[str, Any]] = Field(default=None, description="Updated tool input arguments if modified by the hook")
+        additionalContext: Optional[str] = Field(default=None, description="Additional context added to the model")
+    hookSpecificOutput: HookSpecificOutput = Field(description="PreToolUse specific output")
+
+
+class ClaudePermissionRequestOutput(ClaudeCommonOutput):
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["PermissionRequest"] = "PermissionRequest"
+        behavior: Literal["allow", "deny"] = Field(description="Behavior for the permission request")
+        updatedInput: Optional[Dict[str, Any]] = Field(default=None, description="Updated tool input arguments if modified by the hook")
+        # TODO Add a better type of permission suggestion
+        updatedPermissions: Optional[List[Any]] = Field(default=None, description="Updated permissions if modified by the hook")
+        message: Optional[str] = Field(default=None, description="Message to model regarding the permission request")
+        interrupt: Optional[bool] = Field(default=False, description="If `deny` stop the model")
+    hookSpecificOutput: HookSpecificOutput = Field(description="PermissionRequest specific output")
+
+
+class ClaudePostToolUseOutput(ClaudeCommonOutput):
+    decision: Optional[Literal["block"]] = Field(default=None, description="Whether to block the tool response from being sent to the model")
+    reason: str = Field(default="", description="Reason for blocking the tool response if decision is block")
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["PostToolUse"] = "PostToolUse"
+        additionalContext: Optional[str] = Field(default=None, description="Additional context added to the model")
+        updatedMCPToolOutput: Optional[Any] = Field(default=None, description="Updated tool output if modified by the hook")
+    hookSpecificOutput: Optional[HookSpecificOutput] = Field(default=None, description="PostToolUse specific output")
+
+
+class ClaudePostToolUseFailureOutput(ClaudeCommonOutput):
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["PostToolUseFailure"] = "PostToolUseFailure"
+        additionalContext: Optional[str] = Field(default=None, description="Additional context added to the model")
+    hookSpecificOutput: Optional[HookSpecificOutput] = Field(default=None, description="PostToolUseFailure specific output")
+
+
+class ClaudeNotificationOutput(ClaudeCommonOutput):
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["Notification"] = "Notification"
+        additionalContext: Optional[str] = Field(default=None, description="Additional context added to the model")
+    hookSpecificOutput: Optional[HookSpecificOutput] = Field(default=None, description="Notification specific output")
+
+
+class ClaudeSubAgentStartupOutput(ClaudeCommonOutput):
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["SubAgentStartup"] = "SubAgentStartup"
+        additionalContext: Optional[str] = Field(default=None, description="Additional context added to the model")
+    hookSpecificOutput: Optional[HookSpecificOutput] = Field(default=None, description="SubAgentStartup specific output")
+
+
+class ClaudeSubAgentStopOutput(ClaudeCommonOutput):
+    decision: Optional[Literal["block"]] = Field(default=None, description="Whether to block the sub-agent shutdown process")
+    reason: str = Field(default="", description="Reason for blocking the sub-agent shutdown if decision is block")
+    
+
+class ClaudeStopOutput(ClaudeCommonOutput):
+    """StopFailure hooks have no decision control.
+    They run for notification and logging purposes only."""
+
+
+# TODO Fix this. There is some very different behavior here we need to look into
+class ClaudeTeammateIdleOutput(ClaudeCommonOutput):
+    continue_: bool = Field(default=True, alias="_continue", description="Whether to continue processing")
+    stopReason: Optional[str] = Field(default=None, description="Reason for stopping if continue=False")
+
+# TODO Fix this. There is some very different behavior here we need to look into
+class ClaudeTaskCompletedOutput(ClaudeCommonOutput):
+    continue_: bool = Field(default=True, alias="_continue", description="Whether to continue processing")
+    stopReason: Optional[str] = Field(default=None, description="Reason for stopping if continue=False")
+
+class ClaudeConfigChangeOutput(ClaudeCommonOutput):
+    decision: Optional[Literal["block"]] = Field(default=True, alias="_continue", description="Whether to continue processing")
+    reason: Optional[str] = Field(default=None, description="Reason for stopping if continue=False")
+
+# TODO Worktree outputs are different. Not currently supported
+
+
+class ClaudeElicitationOutput(ClaudeCommonOutput):
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["Elicitation"] = "Elicitation"
+        action: Literal["accept", "decline", "cancel"] = Field(default=None, description="Whether to accept, decline, or cancel the request")
+        content: Optional[Dict[str, Any]] = Field(default=None, description="Form field values to submit. Only used when action is accept")
+    hookSpecificOutput: Optional[HookSpecificOutput] = Field(default=None, description="Elicitation specific output")
+
+class ClaudeElicitationResultOutput(ClaudeCommonOutput):
+    class HookSpecificOutput(BaseModel):
+        hook_event_name: Literal["ElicitationResult"] = "ElicitationResult"
+        action: Literal["accept", "decline", "cancel"] = Field(default=None, description="Whether to accept, decline, or cancel the request")
+        content: Optional[Dict[str, Any]] = Field(default=None, description="Form field values to submit. Only used when action is accept")
+    hookSpecificOutput: Optional[HookSpecificOutput] = Field(default=None, description="Elicitation specific output")
 
 
 # =============================================================================
