@@ -20,6 +20,7 @@ Key Improvements:
 from abc import ABC, abstractmethod
 import logging
 from typing import Annotated, Any, Dict, Generic, Literal, Optional, Type, TypeVar, Union
+from xml.parsers.expat import model
 
 from pydantic import BaseModel, Field, field_validator, model_validator, AliasChoices
 
@@ -51,8 +52,48 @@ class ClaudeCommonFields(BaseModel):
         description="Current permission mode"
     )
     agent_id: Optional[str] = Field(default=None, description="Agent identifier if applicable")
-    agent_type: Optional[str] = Field(default=None, description="Agent type if applicable")
+    agent_type: Optional[str] = Field(default=None, description="Agent name")
 
+
+class ClaudeSessionStartInput(ClaudeCommonFields):
+    """Claude Code SessionStart event input schema."""
+    hook_event_name: Literal["SessionStart"]
+    source: str = Field(description="Indicates how a session was started")
+    model: str = Field(description="Model being used for the session")
+
+
+class ClaudeInstructionsLoaded(ClaudeCommonFields):
+    """Claude Code InstructionsLoaded event input schema."""
+    hook_event_name: Literal["InstructionsLoaded"]
+    file_path: str = Field(description="Path to the loaded instructions file")
+    memory_type: Literal["User", "Project", "Local", "Managed"] = Field(description="Scope of the file loaded")
+    load_reason: Literal["session_start", "nested_traversal", "path_glob_match", "include", "compact"] = Field(description="Why the file loaded")
+    globs: str = Field(description="Glob patterns used for file paths")
+    trigger_file_path: str = Field(description="Path to the file whose access triggered this load, for lazy loads")
+    parent_file_path: str   = Field(description="Path to the parent file")
+
+
+class ClaudeUserPromptSubmitInput(ClaudeCommonFields):
+    """Claude Code UserPromptSubmit event input schema."""
+    hook_event_name: Literal["UserPromptSubmit"]
+    prompt: str = Field(description="Content of the user prompt")
+
+
+class ClaudePermissionRequestInput(ClaudeCommonFields):
+    """Claude Code PermissionRequest event input schema."""
+    hook_event_name: Literal["PermissionRequest"]
+    tool_name: str = Field(description="Name of the tool for which permission is being requested")
+    tool_input: Dict[str, Any] = Field(default_factory=dict, description="Arguments for the tool invocation")
+    permission_suggestions: Optional[Dict[str, Any]] = Field(default=None, description="Suggested permission decisions based on input")
+    # TODO Add a better type of permission suggestion
+
+class ClaudePermissionUpdateInput(ClaudeCommonFields):
+    """Claude Code PermissionUpdate event input schema."""
+    hook_event_name: Literal["PermissionUpdate"]
+    tool_name: str = Field(description="Name of the tool for which permission decision was made")
+    tool_input: Dict[str, Any] = Field(default_factory=dict, description="Arguments for the tool invocation")
+    permission_decision: Literal["allow", "deny"] = Field(description="The permission decision that was made")
+    permission_decision_reason: Optional[str] = Field(default=None, description="Reason for the permission decision")
 
 class ClaudePreToolUseInput(ClaudeCommonFields):
     """Claude Code PreToolUse event input schema."""
@@ -89,8 +130,144 @@ class ClaudePostToolUseInput(ClaudeCommonFields):
         return v.strip()
 
 
+class ClaudePostToolUseFailureInput(ClaudeCommonFields):
+    """Claude Code PostToolUse event input schema for failed tool invocations."""
+    hook_event_name: Literal["PostToolUseFailure"]
+    tool_name: str = Field(description="Name of the tool that was invoked")
+    tool_input: Dict[str, Any] = Field(default_factory=dict, description="Arguments that were used for tool invocation")    
+    tool_response: Dict[str, Any] = Field(default=None, description="Raw response from the tool")
+    tool_use_id: str
+    error: str = Field(description="Error message describing the failure")
+    is_interrupt: Optional[bool] = Field(default=False, description="Whether the failure was due to an interrupt")
+
+
+class ClaudeNotificationInput(ClaudeCommonFields):
+    """Claude Code Notification event input schema."""
+    hook_event_name: Literal["Notification"]
+    message: str = Field(description="Content of the notification")
+    title: str = Field(description="Title of the notification")
+    notification_type: Literal["permission_prompt", "idle_prompt", "auth_success", "elicitation_dialog"]
+    
+
+class ClaudeSubAgentStartupInput(ClaudeCommonFields):
+    hook_event_name: Literal["SubAgentStartup"]
+    agent_id: str = Field(description="Identifier for the sub-agent that is starting up")
+    agent_type: str = Field(description="Type or name of the sub-agent that is starting up")
+    
+
+class ClaudeSubAgentStopInput(ClaudeCommonFields):
+    hook_event_name: Literal["SubAgentStop"]
+    stop_hook_active: bool = Field(description="Whether the stop hook is active and can be used to intercept the shutdown process")
+    agent_id: str = Field(description="Identifier for the sub-agent that is shutting down")
+    agnet_type: str = Field(description="Type or name of the sub-agent that is shutting down")
+    agent_transcript_path: str = Field(description="Path to the sub-agent's transcript file that can be accessed during shutdown")
+    last_assistant_message: str = Field(description="Content of the last message sent by the assistant before shutdown")
+
+
+class ClaudeStopInput(ClaudeCommonFields):
+    hook_event_name: Literal["Stop"]
+    stop_hook_active: bool = Field(description="Whether the stop hook is active and can be used to intercept the shutdown process")
+    last_assistant_message: str = Field(description="Content of the last message sent by the assistant before shutdown")
+
+
+class ClaudeStopFailureInput(ClaudeStopInput):
+    hook_event_name: Literal["StopFailure"]
+    error: str = Field(description="Error message describing the failure")
+    error_details: Optional[str] = Field(default=None, description="Additional details about the error")
+
+
+class ClaudeTeammateIdleInput(ClaudeCommonFields):
+    hook_event_name: Literal["TeammateIdle"]
+    teammate_name: str = Field(description="Name of the teammate who is idle")
+    team_name: str = Field(description="Name of the team that the idle teammate belongs to")
+
+
+class ClaudeTaskCompletedInput(ClaudeCommonFields):
+    hook_event_name: Literal["TaskCompleted"]
+    task_id: str = Field(description="Identifier of the task being completed")
+    task_subject: str = Field(description="Title of the task")
+    task_description: Optional[str] = Field(default=None, description="Detailed description of the task. May be absent")
+    teammate_name: Optional[str] = Field(default=None, description="Name of the teammate completing the task. May be absent")
+    team_name: Optional[str] = Field(default=None, description="Name of the team. May be absent")
+    
+
+class ClaudeConfigChangeInput(ClaudeCommonFields):
+    hook_event_name: Literal["ConfigChange"]
+    source: str = Field(description="Indicates which configuration type changed")
+    file_path: Optional[str] = Field(default=None, description="The path to the specific file that was modified")
+
+
+class ClaudeWorktreeCreateInput(ClaudeCommonFields):
+    hook_event_name: Literal["WorktreeCreate"]
+    name: str = Field(description="Slug identifier for the new worktree, either specified by the user or auto-generated")
+
+
+class ClaudeWorktreeRemoveInput(ClaudeCommonFields):
+    hook_event_name: Literal["WorktreeRemove"]
+    worktree_path: str = Field(description="Path to the worktree that is being removed")
+
+
+class ClaudePreCompactInput(ClaudeCommonFields):
+    hook_event_name: Literal["PreCompact"]
+    trigger: Literal["manual", "auto"] = Field(description="What triggered the compaction process")
+    custom_instructions: str = Field(description="The custom instructions that will be used for the compaction process, if applicable")
+    # No additional fields for now, but can be extended in the future
+
+
+class ClaudePostCompactInput(ClaudeCommonFields):
+    hook_event_name: Literal["PostCompact"]
+    trigger: Literal["manual", "auto"] = Field(description="What triggered the compaction process")
+    compact_summary: str = Field(description="The custom instructions that were used for the compaction process, if applicable")
+
+class ClaudeSessionEndInput(ClaudeCommonFields):
+    hook_event_name: Literal["SessionEnd"]
+    reason: Literal["clear", "resume", "logout", "prompt_input_exit", "bypass_permissions_disabled", "other"] = Field(description="Reason for session end")
+    
+
+class ClaudeElicitationInput(ClaudeCommonFields):
+    hook_event_name: Literal["Elicitation"]
+    mcp_server_name: str = Field(description="Name of the MCP server that is eliciting information")
+    message: str = Field(description="The message content eliciting information from the user")
+    # mode: Optional[str] = Field(default=None, description="The mode of elicitation, if applicable")
+    mode: Optional[Literal["form", "url"]] = Field(default=None, description="The mode of elicitation, if applicable")
+    url: Optional[str] = Field(default=None, description="A URL related to the elicitation, if applicable")
+    elicitation_id: Optional[str] = Field(default=None, description="An identifier for the elicitation event, if applicable")
+    requested_schema: Optional[Dict[str, Any]] = Field(default=None, description="The schema for the information being elicited, if applicable")
+    
+
+class ClaudeElicitationResultInput(ClaudeCommonFields):
+    hook_event_name: Literal["ElicitationResult"]
+    mcp_server_name: str = Field(description="Name of the MCP server that elicited information")
+    action: str = Field(description="The action that the user took in response to the elicitation")
+    elicitation_id: Optional[str] = Field(default=None, description="An identifier for the elicitation event, if applicable")
+    mode: Optional[Literal["form", "url"]] = Field(default=None, description="The mode of elicitation, if applicable")
+    elicitation_id: Optional[str] = Field(default=None, description="An identifier for the elicitation event, if applicable")
+    content: Optional[Union[str, Dict[str, Any]]] = Field(default=None, description="The content of the user's response to the elicitation, which may be a string or structured data depending on the elicitation mode and requested schema")
+ 
+                                    
 ClaudeHookInput = Annotated[
-    Union[ClaudePreToolUseInput, ClaudePostToolUseInput],
+    Union[ClaudeSessionStartInput,
+        ClaudeUserPromptSubmitInput,
+        ClaudePreToolUseInput, 
+        ClaudePostToolUseInput,
+        ClaudePostToolUseFailureInput,
+        ClaudeNotificationInput,
+        ClaudeSubAgentStartupInput,
+        ClaudeSubAgentStopInput,
+        ClaudeStopInput,
+        ClaudeStopFailureInput,
+        ClaudeTeammateIdleInput,
+        ClaudeTaskCompletedInput,
+        ClaudeConfigChangeInput,
+        ClaudeWorktreeCreateInput,
+        ClaudeWorktreeRemoveInput,
+        ClaudePreCompactInput,
+        ClaudePostCompactInput,
+        ClaudeElicitationInput,
+        ClaudeElicitationResultInput,
+        ClaudeSessionEndInput,
+        ClaudeInstructionsLoaded
+        ],
     Field(discriminator="hook_event_name")
 ]
 
@@ -338,36 +515,36 @@ class ImprovedClaudeCodeSchemaMapper(SchemaMapper):
 register_schema_mapper("claude-code-improved", ImprovedClaudeCodeSchemaMapper)
 
 
-# =============================================================================
-# Usage Examples and Migration Helper
-# =============================================================================
+# # =============================================================================
+# # Usage Examples and Migration Helper
+# # =============================================================================
 
-def migrate_from_old_mapper() -> ImprovedClaudeCodeSchemaMapper:
-    """Helper function to migrate from old ClaudeCodeSchemaMapper.
+# def migrate_from_old_mapper() -> ImprovedClaudeCodeSchemaMapper:
+#     """Helper function to migrate from old ClaudeCodeSchemaMapper.
 
-    Returns:
-        ImprovedClaudeCodeSchemaMapper instance ready to use
+#     Returns:
+#         ImprovedClaudeCodeSchemaMapper instance ready to use
 
-    Examples:
-        >>> # Replace old mapper
-        >>> # old_mapper = ClaudeCodeSchemaMapper()
-        >>> mapper = migrate_from_old_mapper()
-        >>>
-        >>> # Same interface, better type safety
-        >>> claude_payload = {
-        ...     "tool_name": "search",
-        ...     "tool_input": {"query": "test"},
-        ...     "session_id": "123",
-        ...     "transcript_path": "/tmp/transcript",
-        ...     "cwd": "/workspace",
-        ...     "permission_mode": "default",
-        ...     "hook_event_name": "PreToolUse"
-        ... }
-        >>> cpex_payload = mapper.map_to_hook_payload(claude_payload, "tool_pre_invoke")
-        >>> assert cpex_payload["name"] == "search"
-        >>> assert cpex_payload["args"]["query"] == "test"
-    """
-    return ImprovedClaudeCodeSchemaMapper()
+#     Examples:
+#         >>> # Replace old mapper
+#         >>> # old_mapper = ClaudeCodeSchemaMapper()
+#         >>> mapper = migrate_from_old_mapper()
+#         >>>
+#         >>> # Same interface, better type safety
+#         >>> claude_payload = {
+#         ...     "tool_name": "search",
+#         ...     "tool_input": {"query": "test"},
+#         ...     "session_id": "123",
+#         ...     "transcript_path": "/tmp/transcript",
+#         ...     "cwd": "/workspace",
+#         ...     "permission_mode": "default",
+#         ...     "hook_event_name": "PreToolUse"
+#         ... }
+#         >>> cpex_payload = mapper.map_to_hook_payload(claude_payload, "tool_pre_invoke")
+#         >>> assert cpex_payload["name"] == "search"
+#         >>> assert cpex_payload["args"]["query"] == "test"
+#     """
+#     return ImprovedClaudeCodeSchemaMapper()
 
 
 if __name__ == "__main__":
