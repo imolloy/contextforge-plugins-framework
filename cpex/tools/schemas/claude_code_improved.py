@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# flake8: noqa
 """Location: ./cpex/tools/schemas/claude_code_improved.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -22,9 +23,10 @@ import logging
 from typing import Annotated, Any, Dict, Generic, List, Literal, Optional, Type, TypeVar, Union
 from xml.parsers.expat import model
 
-from pydantic import BaseModel, Field, field_validator, model_validator, AliasChoices
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator, AliasChoices
 
 from cpex.framework.hooks.tools import ToolPreInvokePayload, ToolPostInvokePayload
+from cpex.framework.hooks.prompts import PromptPrehookPayload, PromptPosthookPayload
 from cpex.framework.models import PluginResult, PluginViolation
 from cpex.tools.schemas.base import SchemaMapper, register_schema_mapper
 
@@ -119,7 +121,7 @@ class ClaudePostToolUseInput(ClaudeCommonFields):
     hook_event_name: Literal["PostToolUse"]
     tool_name: str = Field(description="Name of the tool that was invoked")
     tool_input: Dict[str, Any] = Field(default_factory=dict, description="Arguments that were used for tool invocation")    
-    tool_response: Dict[str, Any] = Field(default=None, description="Raw response from the tool")
+    tool_response: Optional[Dict[str, Any]] = Field(default=None, description="Raw response from the tool")
     tool_use_id: str
 
     @field_validator('tool_name')
@@ -170,8 +172,10 @@ class ClaudeStopInput(ClaudeCommonFields):
     last_assistant_message: str = Field(description="Content of the last message sent by the assistant before shutdown")
 
 
-class ClaudeStopFailureInput(ClaudeStopInput):
+class ClaudeStopFailureInput(ClaudeCommonFields):
     hook_event_name: Literal["StopFailure"]
+    stop_hook_active: bool = Field(description="Whether the stop hook is active and can be used to intercept the shutdown process")
+    last_assistant_message: str = Field(description="Content of the last message sent by the assistant before shutdown")
     error: str = Field(description="Error message describing the failure")
     error_details: Optional[str] = Field(default=None, description="Additional details about the error")
 
@@ -278,9 +282,9 @@ ClaudeHookInput = Annotated[
 # TODO Verify these common fields
 class ClaudeCommonOutput(BaseModel):
     """Common output fields for all Claude Code responses."""
-    continue_: bool = Field(alias="_continue", description="Whether to continue processing")
+    continue_: Optional[bool] = Field(alias="_continue", description="Whether to continue processing")
     stop_reason: Optional[str] = Field(default=None, description="Reason for stopping if continue=False")
-    suppress_output: bool = Field(default=False, description="Whether to suppress output to user")
+    suppress_output: Optional[bool] = Field(default=False, description="Whether to suppress output to user")
     system_message: Optional[str] = Field(default=None, description="Message to display to user")
     model_config = {"populate_by_name": True}
 
@@ -292,10 +296,9 @@ class ClaudePreToolUseOutput(ClaudeCommonOutput):
         hook_event_name: Literal["PreToolUse"] = "PreToolUse"
         permission_decision: Literal["allow", "deny"] = Field(description="Permission decision")
         permission_decision_reason: Optional[str] = Field(default=None, description="Reason for denial")
-
+        updatedInput: Optional[Dict[str, Any]] = Field(default=None, description="Updated tool input arguments if modified by the hook")
+        additionalContext: Optional[str] = Field(default=None, description="Additional context added to the model")
     hookSpecificOutput: HookSpecificOutput = Field(description="PreToolUse specific output")
-    modified_payload: Optional[Dict[str, Any]] = Field(default=None, description="Modified tool arguments")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata")
 
 
 class ClaudePostToolUseOutput(ClaudeCommonOutput):
@@ -390,7 +393,7 @@ class ClaudeSubAgentStartupOutput(ClaudeCommonOutput):
 class ClaudeSubAgentStopOutput(ClaudeCommonOutput):
     decision: Optional[Literal["block"]] = Field(default=None, description="Whether to block the sub-agent shutdown process")
     reason: str = Field(default="", description="Reason for blocking the sub-agent shutdown if decision is block")
-    
+
 
 class ClaudeStopOutput(ClaudeCommonOutput):
     """StopFailure hooks have no decision control.
@@ -402,10 +405,12 @@ class ClaudeTeammateIdleOutput(ClaudeCommonOutput):
     continue_: bool = Field(default=True, alias="_continue", description="Whether to continue processing")
     stopReason: Optional[str] = Field(default=None, description="Reason for stopping if continue=False")
 
+
 # TODO Fix this. There is some very different behavior here we need to look into
 class ClaudeTaskCompletedOutput(ClaudeCommonOutput):
     continue_: bool = Field(default=True, alias="_continue", description="Whether to continue processing")
     stopReason: Optional[str] = Field(default=None, description="Reason for stopping if continue=False")
+
 
 class ClaudeConfigChangeOutput(ClaudeCommonOutput):
     decision: Optional[Literal["block"]] = Field(default=True, alias="_continue", description="Whether to continue processing")
@@ -468,11 +473,11 @@ class HookMapper(ABC, Generic[ClaudeInput, ClaudeOutput, CPEXPayload, CPEXResult
             logger.error(f"Failed to map CPEX result to Claude output: {e}")
             raise ValueError(f"Invalid CPEX result: {e}") from e
 
-    @abstractmethod
+    
     def _transform_to_cpex(self, claude_input: ClaudeInput) -> CPEXPayload:
         """Transform validated Claude input to CPEX payload."""
-        pass
-
+        return self.cpex_payload_type(**claude_input.model_dump(by_alias=True))
+        
     @abstractmethod
     def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeOutput:
         """Transform CPEX result to Claude output."""
@@ -489,19 +494,19 @@ class PreToolUseMapper(HookMapper[ClaudePreToolUseInput, ClaudePreToolUseOutput,
     def __init__(self):
         super().__init__(ClaudePreToolUseInput, ClaudePreToolUseOutput, ToolPreInvokePayload)
 
-    def _transform_to_cpex(self, claude_input: ClaudePreToolUseInput) -> ToolPreInvokePayload:
-        """Transform Claude PreToolUse to CPEX ToolPreInvokePayload."""
-        from cpex.framework.hooks.http import HttpHeaderPayload
+    # def _transform_to_cpex(self, claude_input: ClaudePreToolUseInput) -> ToolPreInvokePayload:
+    #     """Transform Claude PreToolUse to CPEX ToolPreInvokePayload."""
+    #     from cpex.framework.hooks.http import HttpHeaderPayload
 
-        headers = None
-        if claude_input.headers:
-            headers = HttpHeaderPayload(claude_input.headers)
+    #     headers = None
+    #     if claude_input.headers:
+    #         headers = HttpHeaderPayload(claude_input.headers)
 
-        return ToolPreInvokePayload(
-            name=claude_input.tool_name,
-            args=claude_input.tool_input,
-            headers=headers
-        )
+    #     return ToolPreInvokePayload(
+    #         name=claude_input.tool_name,
+    #         args=claude_input.tool_input,
+    #         headers=headers
+    #     )
 
     def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudePreToolUseOutput:
         """Transform CPEX PluginResult to Claude PreToolUse output."""
@@ -517,12 +522,14 @@ class PreToolUseMapper(HookMapper[ClaudePreToolUseInput, ClaudePreToolUseOutput,
             permission_decision_reason=permission_reason
         )
 
+
+        
+
         return ClaudePreToolUseOutput(
-            continue_=cpex_result.continue_processing,
-            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
-            hook_specific_output=hook_specific,
-            modified_payload=cpex_result.modified_payload,
-            metadata=cpex_result.metadata
+            hookSpecificOutput={"permission_decision": cpex_result.continue_processing,
+                                "permission_decision_reason": cpex_result.violation.reason if cpex_result.violation else None,
+                                "updatedInput": cpex_result.modified_payload if cpex_result.modified_payload else None
+                                },
         )
 
 
@@ -532,28 +539,28 @@ class PostToolUseMapper(HookMapper[ClaudePostToolUseInput, ClaudePostToolUseOutp
     def __init__(self):
         super().__init__(ClaudePostToolUseInput, ClaudePostToolUseOutput, ToolPostInvokePayload)
 
-    def _transform_to_cpex(self, claude_input: ClaudePostToolUseInput) -> ToolPostInvokePayload:
-        """Transform Claude PostToolUse to CPEX ToolPostInvokePayload."""
-        # Build result object, preferring explicit result field
-        result = claude_input.result
-        if result is None and claude_input.error:
-            # For error cases, structure the result
-            result = {
-                "success": False,
-                "error": claude_input.error,
-                "execution_time": claude_input.execution_time
-            }
-        elif result is None:
-            # Use available fields as result
-            result = {
-                "success": claude_input.success,
-                "execution_time": claude_input.execution_time
-            }
+    # def _transform_to_cpex(self, claude_input: ClaudePostToolUseInput) -> ToolPostInvokePayload:
+    #     """Transform Claude PostToolUse to CPEX ToolPostInvokePayload."""
+    #     # Build result object, preferring explicit result field
+    #     result = claude_input.result
+    #     if result is None and claude_input.error:
+    #         # For error cases, structure the result
+    #         result = {
+    #             "success": False,
+    #             "error": claude_input.error,
+    #             "execution_time": claude_input.execution_time
+    #         }
+    #     elif result is None:
+    #         # Use available fields as result
+    #         result = {
+    #             "success": claude_input.success,
+    #             "execution_time": claude_input.execution_time
+    #         }
 
-        return ToolPostInvokePayload(
-            name=claude_input.tool_name,
-            result=result
-        )
+    #     return ToolPostInvokePayload(
+    #         name=claude_input.tool_name,
+    #         result=result
+    #     )
 
     def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudePostToolUseOutput:
         """Transform CPEX PluginResult to Claude PostToolUse output."""
@@ -562,11 +569,34 @@ class PostToolUseMapper(HookMapper[ClaudePostToolUseInput, ClaudePostToolUseOutp
         return ClaudePostToolUseOutput(
             continue_=cpex_result.continue_processing,
             stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
-            hook_specific_output=hook_specific,
+            hookSpecificOutput=hook_specific,
             modified_result=cpex_result.modified_payload,
             metadata=cpex_result.metadata
         )
 
+
+class UserPromptSubmitMapper(HookMapper[ClaudeUserPromptSubmitInput, ClaudeUserPromptSubmitOutput, PromptPosthookPayload, PluginResult]):
+    """Mapper for UserPromptSubmit events."""
+
+    def __init__(self):
+        super().__init__(ClaudeUserPromptSubmitInput, ClaudeUserPromptSubmitOutput, PromptPosthookPayload)
+    
+    def _transform_to_cpex(self, claude_input: ClaudeUserPromptSubmitInput) -> PromptPosthookPayload:
+        """Transform Claude UserPromptSubmit to CPEX PromptPosthookPayload."""
+        return PromptPosthookPayload(
+            prompt_id="",  # Claude does not provide a prompt ID, so we can leave this blank or generate one if needed
+            result=claude_input.prompt
+        )
+    
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeUserPromptSubmitOutput:
+        """Transform CPEX PluginResult to Claude UserPromptSubmit output."""
+        hook_specific = ClaudeUserPromptSubmitOutput.HookSpecificOutput()
+
+        return ClaudeUserPromptSubmitOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            hookSpecificOutput=hook_specific,
+        )
 
 # =============================================================================
 # Main Schema Mapper
@@ -577,26 +607,27 @@ class ImprovedClaudeCodeSchemaMapper(SchemaMapper):
 
     def __init__(self):
         self._mappers = {
-            "tool_pre_invoke": PreToolUseMapper(),
-            "tool_post_invoke": PostToolUseMapper(),
+            "PreToolUse": PreToolUseMapper(),
+            "PostToolUse": PostToolUseMapper(),
+            "UserPromptSubmit": UserPromptSubmitMapper()
         }
+        self.adapter = TypeAdapter(ClaudeHookInput)
 
     def get_supported_hooks(self) -> list[str]:
         """Get list of supported CPEX hook types."""
         return list(self._mappers.keys())
 
-    def map_to_hook_payload(self, external_payload: Dict[str, Any], hook_type: str) -> Dict[str, Any]:
+    def map_to_hook_payload(self, external_payload: Dict[str, Any]) -> CPEXPayload:
         """Transform Claude Code payload to CPEX format with full type safety."""
-        if hook_type not in self._mappers:
-            raise NotImplementedError(f"Hook type not supported: {hook_type}")
+        payload = self.adapter.validate_python(external_payload)
+        
+        if payload.hook_event_name not in self._mappers:
+            raise NotImplementedError(f"Hook type not supported: {payload.hook_event_name}")
 
-        mapper = self._mappers[hook_type]
-        cpex_payload = mapper.map_to_cpex(external_payload)
+        mapper = self._mappers[payload.hook_event_name]
+        cpex_payload = mapper.map_to_cpex(payload)
+        return cpex_payload
 
-        # Convert to dict for compatibility with existing interfaces
-        result = cpex_payload.model_dump()
-        logger.debug(f"Mapped {hook_type}: {external_payload.get('tool_name', 'unknown')} -> {result}")
-        return result
 
     def map_from_hook_result(self, hook_result: PluginResult, hook_type: str) -> Dict[str, Any]:
         """Transform CPEX result to Claude Code format with full type safety."""
@@ -665,40 +696,3 @@ register_schema_mapper("claude-code-improved", ImprovedClaudeCodeSchemaMapper)
 #     return ImprovedClaudeCodeSchemaMapper()
 
 
-if __name__ == "__main__":
-    # Example usage
-    mapper = ImprovedClaudeCodeSchemaMapper()
-
-    # Example Claude Code PreToolUse payload
-    claude_payload = {
-        "tool_name": "file_reader",
-        "tool_input": {"path": "/example.txt", "mode": "read"},
-        "session_id": "session_123",
-        "transcript_path": "/tmp/transcript.log",
-        "cwd": "/workspace",
-        "permission_mode": "default",
-        "hook_event_name": "PreToolUse",
-        "headers": {"Authorization": "Bearer token123"}
-    }
-
-    # Map to CPEX format
-    cpex_payload = mapper.map_to_hook_payload(claude_payload, "tool_pre_invoke")
-    print("CPEX Payload:", cpex_payload)
-
-    # Example CPEX result
-    from cpex.framework.models import PluginViolation
-    violation = PluginViolation(
-        reason="File access denied",
-        description="Cannot access system files",
-        code="ACCESS_DENIED",
-        details={"path": "/example.txt"}
-    )
-    cpex_result = PluginResult(
-        continue_processing=False,
-        violation=violation,
-        metadata={"plugin": "security_checker"}
-    )
-
-    # Map back to Claude format
-    claude_output = mapper.map_from_hook_result(cpex_result, "tool_pre_invoke")
-    print("Claude Output:", claude_output)

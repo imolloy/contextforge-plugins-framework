@@ -22,10 +22,14 @@ Classes
 # Standard
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Type
+from typing import Any, Dict, Type, TypeVar
+from pydantic import BaseModel
 
 # First-Party
-from cpex.framework.models import PluginResult
+from cpex.framework.models import PluginPayload, PluginResult
+CPEXPayload = TypeVar('CPEXPayload', bound=BaseModel)
+CPEXResult = TypeVar('CPEXResult', bound=PluginResult)
+
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +53,7 @@ class SchemaMapper(ABC):
     """
 
     @abstractmethod
-    def map_to_hook_payload(self, external_payload: Dict[str, Any], hook_type: str) -> Dict[str, Any]:
+    def map_to_hook_payload(self, external_payload: Dict[str, Any]) -> CPEXPayload:
         """Transform external tool payload to CPEX hook format.
 
         Args:

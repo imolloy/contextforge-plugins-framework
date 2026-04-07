@@ -9,8 +9,10 @@ from unittest.mock import Mock
 
 from cpex.framework.models import PluginResult, PluginViolation
 from cpex.framework.hooks.tools import ToolPreInvokePayload, ToolPostInvokePayload
+from cpex.framework.hooks.prompts import PromptPrehookPayload, PromptPosthookPayload
+
 # from cpex.tools.schemas.claude_code import ClaudeCodeSchemaMapper, PreToolUseModel
-from cpex.tools.schemas.claude_code_improved import ClaudeHookInput
+from cpex.tools.schemas.claude_code_improved import ClaudeHookInput, ImprovedClaudeCodeSchemaMapper
 from cpex.tools.schemas.base import register_schema_mapper, get_schema_mapper
 
 from pydantic import TypeAdapter
@@ -43,6 +45,7 @@ class TestClaudeCodeSchemaMapper:
         cpex_object = ToolPreInvokePayload(**cpex_payload)
         assert "name" in cpex_payload
         assert cpex_object.name == "Bash"
+        # assert cpex_payload["name"] == "Bash"
     
     
         claude_hook_payload_post = {
@@ -67,6 +70,41 @@ class TestClaudeCodeSchemaMapper:
             }
         payload = adapter.validate_python(claude_hook_payload_post)
     
+    def test_map_from_claude_with_mapper(self):
+        claude_hook_payload = {
+            "session_id": "abc123",
+            "transcript_path": "/home/user/.claude/projects/.../transcript.jsonl",
+            "cwd": "/home/user/my-project",
+            "permission_mode": "default",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "npm test"
+            }
+            }
+        
+        mapper = ImprovedClaudeCodeSchemaMapper()
+        assert len(mapper.get_supported_hooks()) > 0
+        cpex_payload = mapper.map_to_hook_payload(claude_hook_payload)
+        print(f"{type(cpex_payload)} -> {cpex_payload}")
+        assert isinstance(cpex_payload, ToolPreInvokePayload)
+        assert cpex_payload.name == "Bash"
+
+    def test_userprompt(self):
+        claude_payload = {
+            "session_id": "abc123",
+            "transcript_path": "/Users/.../.claude/projects/.../00893aaf-19fa-41d2-8238-13269b9b3ca0.jsonl",
+            "cwd": "/Users/...",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Write a function to calculate the factorial of a number"
+            }
+        mapper = ImprovedClaudeCodeSchemaMapper()
+        cpex_payload = mapper.map_to_hook_payload(claude_payload)
+        assert isinstance(cpex_payload, PromptPosthookPayload)
+        assert cpex_payload.result == claude_payload["prompt"]
+
+
     # def test_map_from_hook_result_basic_success(self):
     #     """Test basic successful PluginResult to Claude Code conversion."""
     #     # Create a basic successful PluginResult
