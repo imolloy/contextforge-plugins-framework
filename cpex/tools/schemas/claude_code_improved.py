@@ -27,6 +27,10 @@ from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_valid
 
 from cpex.framework.hooks.tools import ToolPreInvokePayload, ToolPostInvokePayload
 from cpex.framework.hooks.prompts import PromptPrehookPayload, PromptPosthookPayload
+from cpex.framework.hooks.agents import AgentPreInvokePayload, AgentPostInvokePayload
+from cpex.framework.hooks.resources import ResourcePreFetchPayload, ResourcePostFetchPayload
+from cpex.framework.hooks.claude_instructions import InstructionsLoadedPayload
+from cpex.framework.hooks.claude_permissions import PermissionRequestPayload, PermissionUpdatePayload
 from cpex.framework.models import PluginResult, PluginViolation
 from cpex.tools.schemas.base import SchemaMapper, register_schema_mapper
 
@@ -161,7 +165,7 @@ class ClaudeSubAgentStopInput(ClaudeCommonFields):
     hook_event_name: Literal["SubAgentStop"]
     stop_hook_active: bool = Field(description="Whether the stop hook is active and can be used to intercept the shutdown process")
     agent_id: str = Field(description="Identifier for the sub-agent that is shutting down")
-    agnet_type: str = Field(description="Type or name of the sub-agent that is shutting down")
+    agent_type: str = Field(description="Type or name of the sub-agent that is shutting down")
     agent_transcript_path: str = Field(description="Path to the sub-agent's transcript file that can be accessed during shutdown")
     last_assistant_message: str = Field(description="Content of the last message sent by the assistant before shutdown")
 
@@ -252,9 +256,11 @@ class ClaudeElicitationResultInput(ClaudeCommonFields):
 ClaudeHookInput = Annotated[
     Union[ClaudeSessionStartInput,
         ClaudeUserPromptSubmitInput,
-        ClaudePreToolUseInput, 
+        ClaudePreToolUseInput,
         ClaudePostToolUseInput,
         ClaudePostToolUseFailureInput,
+        ClaudePermissionRequestInput,
+        ClaudePermissionUpdateInput,
         ClaudeNotificationInput,
         ClaudeSubAgentStartupInput,
         ClaudeSubAgentStopInput,
@@ -598,6 +604,700 @@ class UserPromptSubmitMapper(HookMapper[ClaudeUserPromptSubmitInput, ClaudeUserP
             hookSpecificOutput=hook_specific,
         )
 
+
+class SubAgentStartupMapper(HookMapper[ClaudeSubAgentStartupInput, ClaudeSubAgentStartupOutput, AgentPreInvokePayload, PluginResult]):
+    """Mapper for SubAgentStartup events."""
+
+    def __init__(self):
+        super().__init__(ClaudeSubAgentStartupInput, ClaudeSubAgentStartupOutput, AgentPreInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeSubAgentStartupInput) -> AgentPreInvokePayload:
+        """Transform Claude SubAgentStartup to CPEX AgentPreInvokePayload."""
+        return AgentPreInvokePayload(
+            agent_id=claude_input.agent_id,
+            messages=[],  # No messages in startup event
+            tools=None,
+            headers=None,
+            model=None,
+            system_prompt=None,
+            parameters={"agent_type": claude_input.agent_type}
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeSubAgentStartupOutput:
+        """Transform CPEX PluginResult to Claude SubAgentStartup output."""
+        hook_specific = ClaudeSubAgentStartupOutput.HookSpecificOutput()
+
+        return ClaudeSubAgentStartupOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            hookSpecificOutput=hook_specific,
+        )
+
+
+class SubAgentStopMapper(HookMapper[ClaudeSubAgentStopInput, ClaudeSubAgentStopOutput, AgentPostInvokePayload, PluginResult]):
+    """Mapper for SubAgentStop events."""
+
+    def __init__(self):
+        super().__init__(ClaudeSubAgentStopInput, ClaudeSubAgentStopOutput, AgentPostInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeSubAgentStopInput) -> AgentPostInvokePayload:
+        """Transform Claude SubAgentStop to CPEX AgentPostInvokePayload."""
+        # Create a simple message representing the agent's final state
+        final_message = {
+            "role": "assistant",
+            "content": claude_input.last_assistant_message
+        }
+
+        return AgentPostInvokePayload(
+            agent_id=claude_input.agent_id,
+            messages=[final_message],
+            tool_calls=None
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeSubAgentStopOutput:
+        """Transform CPEX PluginResult to Claude SubAgentStop output."""
+        decision = "block" if not cpex_result.continue_processing else None
+        reason = cpex_result.violation.reason if cpex_result.violation else ""
+
+        return ClaudeSubAgentStopOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            decision=decision,
+            reason=reason
+        )
+
+
+class PostToolUseFailureMapper(HookMapper[ClaudePostToolUseFailureInput, ClaudePostToolUseFailureOutput, ToolPostInvokePayload, PluginResult]):
+    """Mapper for PostToolUseFailure events."""
+
+    def __init__(self):
+        super().__init__(ClaudePostToolUseFailureInput, ClaudePostToolUseFailureOutput, ToolPostInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudePostToolUseFailureInput) -> ToolPostInvokePayload:
+        """Transform Claude PostToolUseFailure to CPEX ToolPostInvokePayload."""
+        # Structure the result to include error information
+        result = {
+            "success": False,
+            "error": claude_input.error,
+            "is_interrupt": claude_input.is_interrupt,
+            "tool_response": claude_input.tool_response,
+            "tool_use_id": claude_input.tool_use_id
+        }
+
+        return ToolPostInvokePayload(
+            name=claude_input.tool_name,
+            result=result
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudePostToolUseFailureOutput:
+        """Transform CPEX PluginResult to Claude PostToolUseFailure output."""
+        hook_specific = ClaudePostToolUseFailureOutput.HookSpecificOutput()
+
+        return ClaudePostToolUseFailureOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            hookSpecificOutput=hook_specific,
+        )
+
+
+class InstructionsLoadedMapper(HookMapper[ClaudeInstructionsLoaded, ClaudeInstructionsLoadedOutput, InstructionsLoadedPayload, PluginResult]):
+    """Mapper for InstructionsLoaded events."""
+
+    def __init__(self):
+        super().__init__(ClaudeInstructionsLoaded, ClaudeInstructionsLoadedOutput, InstructionsLoadedPayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeInstructionsLoaded) -> InstructionsLoadedPayload:
+        """Transform Claude InstructionsLoaded to CPEX InstructionsLoadedPayload."""
+        return InstructionsLoadedPayload(
+            file_path=claude_input.file_path,
+            memory_type=claude_input.memory_type,
+            load_reason=claude_input.load_reason,
+            globs=claude_input.globs,
+            trigger_file_path=claude_input.trigger_file_path,
+            parent_file_path=claude_input.parent_file_path
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeInstructionsLoadedOutput:
+        """Transform CPEX PluginResult to Claude InstructionsLoaded output."""
+        # InstructionsLoaded hooks are audit-only - they cannot block or modify
+        return ClaudeInstructionsLoadedOutput(
+            continue_=True,  # Always continue for audit-only hooks
+            stop_reason=None
+        )
+
+
+class PermissionRequestMapper(HookMapper[ClaudePermissionRequestInput, ClaudePermissionRequestOutput, PermissionRequestPayload, PluginResult]):
+    """Mapper for PermissionRequest events."""
+
+    def __init__(self):
+        super().__init__(ClaudePermissionRequestInput, ClaudePermissionRequestOutput, PermissionRequestPayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudePermissionRequestInput) -> PermissionRequestPayload:
+        """Transform Claude PermissionRequest to CPEX PermissionRequestPayload."""
+        return PermissionRequestPayload(
+            tool_name=claude_input.tool_name,
+            tool_input=claude_input.tool_input,
+            permission_suggestions=claude_input.permission_suggestions,
+            session_id=claude_input.session_id,
+            cwd=claude_input.cwd,
+            permission_mode=claude_input.permission_mode
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudePermissionRequestOutput:
+        """Transform CPEX PluginResult to Claude PermissionRequest output."""
+        # Determine behavior based on continue_processing
+        behavior = "allow" if cpex_result.continue_processing else "deny"
+
+        hook_specific = ClaudePermissionRequestOutput.HookSpecificOutput(
+            behavior=behavior,
+            updatedInput=cpex_result.modified_payload.tool_input if cpex_result.modified_payload else None,
+            message=cpex_result.violation.reason if cpex_result.violation else None,
+            interrupt=not cpex_result.continue_processing
+        )
+
+        return ClaudePermissionRequestOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            hookSpecificOutput=hook_specific,
+        )
+
+
+class PermissionUpdateMapper(HookMapper[ClaudePermissionUpdateInput, ClaudePermissionRequestOutput, PermissionUpdatePayload, PluginResult]):
+    """Mapper for PermissionUpdate events."""
+
+    def __init__(self):
+        super().__init__(ClaudePermissionUpdateInput, ClaudePermissionRequestOutput, PermissionUpdatePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudePermissionUpdateInput) -> PermissionUpdatePayload:
+        """Transform Claude PermissionUpdate to CPEX PermissionUpdatePayload."""
+        return PermissionUpdatePayload(
+            tool_name=claude_input.tool_name,
+            tool_input=claude_input.tool_input,
+            permission_decision=claude_input.permission_decision,
+            permission_decision_reason=claude_input.permission_decision_reason,
+            session_id=claude_input.session_id,
+            cwd=claude_input.cwd,
+            permission_mode=claude_input.permission_mode
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudePermissionRequestOutput:
+        """Transform CPEX PluginResult to Claude PermissionUpdate output."""
+        # PermissionUpdate hooks are primarily audit-only
+        behavior = "allow" if cpex_result.continue_processing else "deny"
+
+        hook_specific = ClaudePermissionRequestOutput.HookSpecificOutput(
+            behavior=behavior,
+            message=cpex_result.violation.reason if cpex_result.violation else None,
+        )
+
+        return ClaudePermissionRequestOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            hookSpecificOutput=hook_specific,
+        )
+
+
+# =============================================================================
+# Session Lifecycle Event Mappers
+# =============================================================================
+
+class SessionStartMapper(HookMapper[ClaudeSessionStartInput, ClaudeSessionStartOutput, AgentPreInvokePayload, PluginResult]):
+    """Mapper for SessionStart events."""
+
+    def __init__(self):
+        super().__init__(ClaudeSessionStartInput, ClaudeSessionStartOutput, AgentPreInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeSessionStartInput) -> AgentPreInvokePayload:
+        """Transform Claude SessionStart to CPEX AgentPreInvokePayload."""
+        return AgentPreInvokePayload(
+            agent_id=f"claude_session_{claude_input.session_id}",
+            messages=[],
+            tools=None,
+            headers=None,
+            model=claude_input.model,
+            system_prompt=None,
+            parameters={
+                "source": claude_input.source,
+                "session_id": claude_input.session_id,
+                "cwd": claude_input.cwd,
+                "permission_mode": claude_input.permission_mode
+            }
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeSessionStartOutput:
+        """Transform CPEX PluginResult to Claude SessionStart output."""
+        additional_context = ""
+        if cpex_result.metadata:
+            # Extract any additional context from metadata
+            additional_context = cpex_result.metadata.get("additional_context", "")
+
+        hook_specific = ClaudeSessionStartOutput.HookSpecificOutput(
+            additionalContext=additional_context
+        )
+
+        return ClaudeSessionStartOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            hookSpecificOutput=hook_specific,
+        )
+
+
+class SessionEndMapper(HookMapper[ClaudeSessionEndInput, ClaudeCommonOutput, AgentPostInvokePayload, PluginResult]):
+    """Mapper for SessionEnd events."""
+
+    def __init__(self):
+        super().__init__(ClaudeSessionEndInput, ClaudeCommonOutput, AgentPostInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeSessionEndInput) -> AgentPostInvokePayload:
+        """Transform Claude SessionEnd to CPEX AgentPostInvokePayload."""
+        # Create a simple message representing the session end
+        end_message = {
+            "role": "system",
+            "content": f"Session ended: {claude_input.reason}"
+        }
+
+        return AgentPostInvokePayload(
+            agent_id=f"claude_session_{claude_input.session_id}",
+            messages=[end_message],
+            tool_calls=None
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeCommonOutput:
+        """Transform CPEX PluginResult to Claude SessionEnd output."""
+        # SessionEnd hooks are primarily audit-only
+        return ClaudeCommonOutput(
+            continue_=True,  # Always continue for audit-only hooks
+            stop_reason=None
+        )
+
+
+class StopMapper(HookMapper[ClaudeStopInput, ClaudeStopOutput, AgentPostInvokePayload, PluginResult]):
+    """Mapper for Stop events."""
+
+    def __init__(self):
+        super().__init__(ClaudeStopInput, ClaudeStopOutput, AgentPostInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeStopInput) -> AgentPostInvokePayload:
+        """Transform Claude Stop to CPEX AgentPostInvokePayload."""
+        stop_message = {
+            "role": "assistant",
+            "content": claude_input.last_assistant_message
+        }
+
+        return AgentPostInvokePayload(
+            agent_id=f"claude_session_{claude_input.session_id}",
+            messages=[stop_message],
+            tool_calls=None
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeStopOutput:
+        """Transform CPEX PluginResult to Claude Stop output."""
+        # Stop hooks are notification/logging only
+        return ClaudeStopOutput(
+            continue_=True,  # Always continue for audit-only hooks
+            stop_reason=None
+        )
+
+
+class StopFailureMapper(HookMapper[ClaudeStopFailureInput, ClaudeCommonOutput, AgentPostInvokePayload, PluginResult]):
+    """Mapper for StopFailure events."""
+
+    def __init__(self):
+        super().__init__(ClaudeStopFailureInput, ClaudeCommonOutput, AgentPostInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeStopFailureInput) -> AgentPostInvokePayload:
+        """Transform Claude StopFailure to CPEX AgentPostInvokePayload."""
+        failure_message = {
+            "role": "system",
+            "content": f"Stop failed: {claude_input.error}"
+        }
+
+        if claude_input.last_assistant_message:
+            # Also include the last assistant message
+            failure_message_assistant = {
+                "role": "assistant",
+                "content": claude_input.last_assistant_message
+            }
+            messages = [failure_message_assistant, failure_message]
+        else:
+            messages = [failure_message]
+
+        return AgentPostInvokePayload(
+            agent_id=f"claude_session_{claude_input.session_id}",
+            messages=messages,
+            tool_calls=None
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeCommonOutput:
+        """Transform CPEX PluginResult to Claude StopFailure output."""
+        # StopFailure hooks are notification/logging only
+        return ClaudeCommonOutput(
+            continue_=True,  # Always continue for audit-only hooks
+            stop_reason=None
+        )
+
+
+# =============================================================================
+# Notification Event Mappers
+# =============================================================================
+
+class NotificationMapper(HookMapper[ClaudeNotificationInput, ClaudeNotificationOutput, PromptPosthookPayload, PluginResult]):
+    """Mapper for Notification events."""
+
+    def __init__(self):
+        super().__init__(ClaudeNotificationInput, ClaudeNotificationOutput, PromptPosthookPayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeNotificationInput) -> PromptPosthookPayload:
+        """Transform Claude Notification to CPEX PromptPosthookPayload."""
+        # Treat the notification as a prompt result
+        notification_result = {
+            "title": claude_input.title,
+            "message": claude_input.message,
+            "notification_type": claude_input.notification_type,
+            "session_id": claude_input.session_id
+        }
+
+        return PromptPosthookPayload(
+            prompt_id=f"notification_{claude_input.notification_type}",
+            result=notification_result
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeNotificationOutput:
+        """Transform CPEX PluginResult to Claude Notification output."""
+        additional_context = ""
+        if cpex_result.metadata:
+            additional_context = cpex_result.metadata.get("additional_context", "")
+
+        hook_specific = ClaudeNotificationOutput.HookSpecificOutput(
+            additionalContext=additional_context
+        )
+
+        return ClaudeNotificationOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            hookSpecificOutput=hook_specific,
+        )
+
+
+class TaskCompletedMapper(HookMapper[ClaudeTaskCompletedInput, ClaudeTaskCompletedOutput, ToolPostInvokePayload, PluginResult]):
+    """Mapper for TaskCompleted events."""
+
+    def __init__(self):
+        super().__init__(ClaudeTaskCompletedInput, ClaudeTaskCompletedOutput, ToolPostInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeTaskCompletedInput) -> ToolPostInvokePayload:
+        """Transform Claude TaskCompleted to CPEX ToolPostInvokePayload."""
+        # Treat the task as a completed tool execution
+        task_result = {
+            "task_id": claude_input.task_id,
+            "task_subject": claude_input.task_subject,
+            "task_description": claude_input.task_description,
+            "teammate_name": claude_input.teammate_name,
+            "team_name": claude_input.team_name,
+            "success": True,
+            "completed": True
+        }
+
+        return ToolPostInvokePayload(
+            name=f"task_{claude_input.task_id}",
+            result=task_result
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeTaskCompletedOutput:
+        """Transform CPEX PluginResult to Claude TaskCompleted output."""
+        # TaskCompleted hooks are audit-only
+        return ClaudeTaskCompletedOutput(
+            continue_=True,
+            stopReason=None
+        )
+
+
+class TeammateIdleMapper(HookMapper[ClaudeTeammateIdleInput, ClaudeTeammateIdleOutput, AgentPostInvokePayload, PluginResult]):
+    """Mapper for TeammateIdle events."""
+
+    def __init__(self):
+        super().__init__(ClaudeTeammateIdleInput, ClaudeTeammateIdleOutput, AgentPostInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeTeammateIdleInput) -> AgentPostInvokePayload:
+        """Transform Claude TeammateIdle to CPEX AgentPostInvokePayload."""
+        idle_message = {
+            "role": "system",
+            "content": f"Teammate {claude_input.teammate_name} is idle in team {claude_input.team_name}"
+        }
+
+        return AgentPostInvokePayload(
+            agent_id=claude_input.teammate_name,
+            messages=[idle_message],
+            tool_calls=None
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeTeammateIdleOutput:
+        """Transform CPEX PluginResult to Claude TeammateIdle output."""
+        # TeammateIdle hooks are notification-only
+        return ClaudeTeammateIdleOutput(
+            continue_=True,
+            stopReason=None
+        )
+
+
+# =============================================================================
+# Configuration Event Mappers
+# =============================================================================
+
+class ConfigChangeMapper(HookMapper[ClaudeConfigChangeInput, ClaudeConfigChangeOutput, ResourcePostFetchPayload, PluginResult]):
+    """Mapper for ConfigChange events."""
+
+    def __init__(self):
+        super().__init__(ClaudeConfigChangeInput, ClaudeConfigChangeOutput, ResourcePostFetchPayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeConfigChangeInput) -> ResourcePostFetchPayload:
+        """Transform Claude ConfigChange to CPEX ResourcePostFetchPayload."""
+        # Treat the config change as a resource fetch event
+        config_content = {
+            "source": claude_input.source,
+            "file_path": claude_input.file_path,
+            "session_id": claude_input.session_id,
+            "change_type": "config_change"
+        }
+
+        # Use file path if available, otherwise use source as URI
+        uri = claude_input.file_path if claude_input.file_path else f"config://{claude_input.source}"
+
+        return ResourcePostFetchPayload(
+            uri=uri,
+            content=config_content
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeConfigChangeOutput:
+        """Transform CPEX PluginResult to Claude ConfigChange output."""
+        # ConfigChange hooks can potentially block
+        decision = "block" if not cpex_result.continue_processing else None
+        reason = cpex_result.violation.reason if cpex_result.violation else None
+
+        return ClaudeConfigChangeOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            decision=decision,
+            reason=reason
+        )
+
+
+# =============================================================================
+# Worktree Event Mappers
+# =============================================================================
+
+class WorktreeCreateMapper(HookMapper[ClaudeWorktreeCreateInput, ClaudeCommonOutput, ToolPreInvokePayload, PluginResult]):
+    """Mapper for WorktreeCreate events."""
+
+    def __init__(self):
+        super().__init__(ClaudeWorktreeCreateInput, ClaudeCommonOutput, ToolPreInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeWorktreeCreateInput) -> ToolPreInvokePayload:
+        """Transform Claude WorktreeCreate to CPEX ToolPreInvokePayload."""
+        worktree_args = {
+            "name": claude_input.name,
+            "session_id": claude_input.session_id,
+            "cwd": claude_input.cwd,
+            "action": "create"
+        }
+
+        return ToolPreInvokePayload(
+            name="worktree_create",
+            args=worktree_args
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeCommonOutput:
+        """Transform CPEX PluginResult to Claude WorktreeCreate output."""
+        # WorktreeCreate hooks are primarily audit-only
+        return ClaudeCommonOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None
+        )
+
+
+class WorktreeRemoveMapper(HookMapper[ClaudeWorktreeRemoveInput, ClaudeCommonOutput, ToolPostInvokePayload, PluginResult]):
+    """Mapper for WorktreeRemove events."""
+
+    def __init__(self):
+        super().__init__(ClaudeWorktreeRemoveInput, ClaudeCommonOutput, ToolPostInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeWorktreeRemoveInput) -> ToolPostInvokePayload:
+        """Transform Claude WorktreeRemove to CPEX ToolPostInvokePayload."""
+        worktree_result = {
+            "worktree_path": claude_input.worktree_path,
+            "session_id": claude_input.session_id,
+            "action": "remove",
+            "success": True
+        }
+
+        return ToolPostInvokePayload(
+            name="worktree_remove",
+            result=worktree_result
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeCommonOutput:
+        """Transform CPEX PluginResult to Claude WorktreeRemove output."""
+        # WorktreeRemove hooks are primarily audit-only
+        return ClaudeCommonOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None
+        )
+
+
+# =============================================================================
+# Compaction Event Mappers
+# =============================================================================
+
+class PreCompactMapper(HookMapper[ClaudePreCompactInput, ClaudeCommonOutput, ToolPreInvokePayload, PluginResult]):
+    """Mapper for PreCompact events."""
+
+    def __init__(self):
+        super().__init__(ClaudePreCompactInput, ClaudeCommonOutput, ToolPreInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudePreCompactInput) -> ToolPreInvokePayload:
+        """Transform Claude PreCompact to CPEX ToolPreInvokePayload."""
+        compact_args = {
+            "trigger": claude_input.trigger,
+            "custom_instructions": claude_input.custom_instructions,
+            "session_id": claude_input.session_id,
+            "action": "pre_compact"
+        }
+
+        return ToolPreInvokePayload(
+            name="compaction",
+            args=compact_args
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeCommonOutput:
+        """Transform CPEX PluginResult to Claude PreCompact output."""
+        return ClaudeCommonOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None
+        )
+
+
+class PostCompactMapper(HookMapper[ClaudePostCompactInput, ClaudeCommonOutput, ToolPostInvokePayload, PluginResult]):
+    """Mapper for PostCompact events."""
+
+    def __init__(self):
+        super().__init__(ClaudePostCompactInput, ClaudeCommonOutput, ToolPostInvokePayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudePostCompactInput) -> ToolPostInvokePayload:
+        """Transform Claude PostCompact to CPEX ToolPostInvokePayload."""
+        compact_result = {
+            "trigger": claude_input.trigger,
+            "compact_summary": claude_input.compact_summary,
+            "session_id": claude_input.session_id,
+            "action": "post_compact",
+            "success": True
+        }
+
+        return ToolPostInvokePayload(
+            name="compaction",
+            result=compact_result
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeCommonOutput:
+        """Transform CPEX PluginResult to Claude PostCompact output."""
+        return ClaudeCommonOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None
+        )
+
+
+# =============================================================================
+# Elicitation Event Mappers
+# =============================================================================
+
+class ElicitationMapper(HookMapper[ClaudeElicitationInput, ClaudeElicitationOutput, PromptPrehookPayload, PluginResult]):
+    """Mapper for Elicitation events."""
+
+    def __init__(self):
+        super().__init__(ClaudeElicitationInput, ClaudeElicitationOutput, PromptPrehookPayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeElicitationInput) -> PromptPrehookPayload:
+        """Transform Claude Elicitation to CPEX PromptPrehookPayload."""
+        # Convert all args to strings as required by PromptPrehookPayload
+        elicitation_args = {
+            "mcp_server_name": claude_input.mcp_server_name,
+            "message": claude_input.message,
+            "mode": claude_input.mode or "",
+            "url": claude_input.url or "",
+            "elicitation_id": claude_input.elicitation_id or "",
+            "requested_schema": str(claude_input.requested_schema) if claude_input.requested_schema else ""
+        }
+
+        return PromptPrehookPayload(
+            prompt_id=claude_input.elicitation_id or f"elicitation_{claude_input.mcp_server_name}",
+            args=elicitation_args
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeElicitationOutput:
+        """Transform CPEX PluginResult to Claude Elicitation output."""
+        # Default action based on continue_processing
+        action = "accept" if cpex_result.continue_processing else "decline"
+        content = None
+
+        # Extract action and content from metadata if available
+        if cpex_result.metadata:
+            action = cpex_result.metadata.get("action", action)
+            content = cpex_result.metadata.get("content", content)
+
+        hook_specific = ClaudeElicitationOutput.HookSpecificOutput(
+            action=action,
+            content=content
+        )
+
+        return ClaudeElicitationOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            hookSpecificOutput=hook_specific,
+        )
+
+
+class ElicitationResultMapper(HookMapper[ClaudeElicitationResultInput, ClaudeElicitationResultOutput, PromptPosthookPayload, PluginResult]):
+    """Mapper for ElicitationResult events."""
+
+    def __init__(self):
+        super().__init__(ClaudeElicitationResultInput, ClaudeElicitationResultOutput, PromptPosthookPayload)
+
+    def _transform_to_cpex(self, claude_input: ClaudeElicitationResultInput) -> PromptPosthookPayload:
+        """Transform Claude ElicitationResult to CPEX PromptPosthookPayload."""
+        elicitation_result = {
+            "mcp_server_name": claude_input.mcp_server_name,
+            "action": claude_input.action,
+            "elicitation_id": claude_input.elicitation_id,
+            "mode": claude_input.mode,
+            "content": claude_input.content
+        }
+
+        return PromptPosthookPayload(
+            prompt_id=claude_input.elicitation_id or f"elicitation_result_{claude_input.mcp_server_name}",
+            result=elicitation_result
+        )
+
+    def _transform_from_cpex(self, cpex_result: PluginResult) -> ClaudeElicitationResultOutput:
+        """Transform CPEX PluginResult to Claude ElicitationResult output."""
+        # Default action based on continue_processing
+        action = "accept" if cpex_result.continue_processing else "decline"
+        content = None
+
+        # Extract action and content from metadata if available
+        if cpex_result.metadata:
+            action = cpex_result.metadata.get("action", action)
+            content = cpex_result.metadata.get("content", content)
+
+        hook_specific = ClaudeElicitationResultOutput.HookSpecificOutput(
+            action=action,
+            content=content
+        )
+
+        return ClaudeElicitationResultOutput(
+            continue_=cpex_result.continue_processing,
+            stop_reason=cpex_result.violation.reason if cpex_result.violation else None,
+            hookSpecificOutput=hook_specific,
+        )
+
 # =============================================================================
 # Main Schema Mapper
 # =============================================================================
@@ -607,9 +1307,46 @@ class ImprovedClaudeCodeSchemaMapper(SchemaMapper):
 
     def __init__(self):
         self._mappers = {
+            # Original mappers
             "PreToolUse": PreToolUseMapper(),
             "PostToolUse": PostToolUseMapper(),
-            "UserPromptSubmit": UserPromptSubmitMapper()
+            "UserPromptSubmit": UserPromptSubmitMapper(),
+
+            # Phase 1: Direct CPEX mappings
+            "SubAgentStartup": SubAgentStartupMapper(),
+            "SubAgentStop": SubAgentStopMapper(),
+            "PostToolUseFailure": PostToolUseFailureMapper(),
+
+            # Phase 2: Claude Code specific payloads
+            "InstructionsLoaded": InstructionsLoadedMapper(),
+            "PermissionRequest": PermissionRequestMapper(),
+            "PermissionUpdate": PermissionUpdateMapper(),
+
+            # Phase 3: Session lifecycle events
+            "SessionStart": SessionStartMapper(),
+            "SessionEnd": SessionEndMapper(),
+            "Stop": StopMapper(),
+            "StopFailure": StopFailureMapper(),
+
+            # Phase 4: Notification events
+            "Notification": NotificationMapper(),
+            "TaskCompleted": TaskCompletedMapper(),
+            "TeammateIdle": TeammateIdleMapper(),
+
+            # Phase 5: Configuration events
+            "ConfigChange": ConfigChangeMapper(),
+
+            # Phase 6: Worktree events
+            "WorktreeCreate": WorktreeCreateMapper(),
+            "WorktreeRemove": WorktreeRemoveMapper(),
+
+            # Phase 7: Compaction events
+            "PreCompact": PreCompactMapper(),
+            "PostCompact": PostCompactMapper(),
+
+            # Phase 8: Elicitation events
+            "Elicitation": ElicitationMapper(),
+            "ElicitationResult": ElicitationResultMapper()
         }
         self.adapter = TypeAdapter(ClaudeHookInput)
 
